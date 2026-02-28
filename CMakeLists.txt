@@ -30,6 +30,41 @@ option(SPATIAL_USE_NETWORK "Enable network functionality" ON)
 # Enable GEOS support
 option(SPATIAL_USE_GEOS "Enable GEOS support" ON)
 
+# Enable PROJ support (coordinate transformations)
+option(SPATIAL_USE_PROJ "Enable PROJ support" ON)
+
+# Enable GDAL support (vector/raster I/O)
+option(SPATIAL_USE_GDAL "Enable GDAL support" ON)
+
+# Enable Shapefile support (requires third_party/shapelib)
+option(SPATIAL_USE_SHAPEFILE "Enable Shapefile support" ON)
+
+# Enable OSM support (requires zlib)
+option(SPATIAL_USE_OSM "Enable OSM support" ON)
+
+# Enable MVT support (Mapbox Vector Tiles)
+option(SPATIAL_USE_MVT "Enable MVT support" ON)
+
+if(SPATIAL_USE_PROJ)
+  add_definitions(-DSPATIAL_USE_PROJ=1)
+endif()
+
+if(SPATIAL_USE_GDAL)
+  add_definitions(-DSPATIAL_USE_GDAL=1)
+endif()
+
+if(SPATIAL_USE_SHAPEFILE)
+  add_definitions(-DSPATIAL_USE_SHAPEFILE=1)
+endif()
+
+if(SPATIAL_USE_OSM)
+  add_definitions(-DSPATIAL_USE_OSM=1)
+endif()
+
+if(SPATIAL_USE_MVT)
+  add_definitions(-DSPATIAL_USE_MVT=1)
+endif()
+
 add_subdirectory(src/spatial)
 add_subdirectory(src/sgl)
 include_directories(src)
@@ -39,29 +74,44 @@ add_subdirectory(src/third_party/yyjson)
 
 include_directories(src/third_party/protozero/include)
 
-include_directories(src/third_party/shapelib)
-add_subdirectory(src/third_party/shapelib)
+if(SPATIAL_USE_SHAPEFILE)
+  include_directories(src/third_party/shapelib)
+  add_subdirectory(src/third_party/shapelib)
+endif()
 
 add_library(${EXTENSION_NAME} STATIC ${EXTENSION_SOURCES})
 
 # annoyingly for expat on windows
 set(CMAKE_FIND_LIBRARY_SUFFIXES ${CMAKE_FIND_LIBRARY_SUFFIXES} MD.lib)
-set(ZLIB_USE_STATIC_LIBS ON)
-set(OPENSSL_USE_STATIC_LIBS ON)
-find_package(ZLIB REQUIRED)
-find_package(PROJ CONFIG REQUIRED)
-find_package(GDAL CONFIG REQUIRED)
-find_package(EXPAT REQUIRED)
-find_package(unofficial-sqlite3 CONFIG REQUIRED)
 
-# Important: The link order matters, its the reverse order of dependency
-set(EXTENSION_DEPENDENCIES GDAL::GDAL PROJ::proj EXPAT::EXPAT
-                           unofficial::sqlite3::sqlite3 ZLIB::ZLIB)
+set(EXTENSION_DEPENDENCIES "")
+
+if(SPATIAL_USE_PROJ OR SPATIAL_USE_GDAL)
+  set(ZLIB_USE_STATIC_LIBS ON)
+  set(OPENSSL_USE_STATIC_LIBS ON)
+  find_package(ZLIB REQUIRED)
+  list(APPEND EXTENSION_DEPENDENCIES ZLIB::ZLIB)
+endif()
+
+if(SPATIAL_USE_PROJ)
+  message(STATUS "Building with PROJ functionality")
+  find_package(PROJ CONFIG REQUIRED)
+  find_package(EXPAT REQUIRED)
+  find_package(unofficial-sqlite3 CONFIG REQUIRED)
+  list(APPEND EXTENSION_DEPENDENCIES PROJ::proj EXPAT::EXPAT unofficial::sqlite3::sqlite3)
+endif()
+
+if(SPATIAL_USE_GDAL)
+  message(STATUS "Building with GDAL functionality")
+  find_package(GDAL CONFIG REQUIRED)
+  list(APPEND EXTENSION_DEPENDENCIES GDAL::GDAL)
+endif()
 
 if(SPATIAL_USE_GEOS)
   message(STATUS "Building with GEOS functionality")
   find_package(GEOS REQUIRED)
-  set(EXTENSION_DEPENDENCIES ${EXTENSION_DEPENDENCIES} GEOS::geos_c)
+  # Link both geos_c (C API) and geos (C++ library, provides geos_d2sfixed_buffered_n)
+  set(EXTENSION_DEPENDENCIES ${EXTENSION_DEPENDENCIES} GEOS::geos_c GEOS::geos)
   add_definitions(-DSPATIAL_USE_GEOS=1)
 endif()
 

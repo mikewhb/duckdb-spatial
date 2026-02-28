@@ -123,6 +123,19 @@ public:
 		return true;
 	}
 
+	// Traverse through PROJECTION nodes to find the underlying LOGICAL_GET.
+	// In DuckDB v1.4.4+, the built-in optimizer may insert PROJECTION nodes
+	// between FILTER and GET before extension optimizers run.
+	static unique_ptr<LogicalOperator> *FindGetThroughProjections(unique_ptr<LogicalOperator> &op) {
+		if (op->type == LogicalOperatorType::LOGICAL_GET) {
+			return &op;
+		}
+		if (op->type == LogicalOperatorType::LOGICAL_PROJECTION && !op->children.empty()) {
+			return FindGetThroughProjections(op->children.front());
+		}
+		return nullptr;
+	}
+
 	static bool TryOptimize(Binder &binder, ClientContext &context, unique_ptr<LogicalOperator> &plan,
 	                        unique_ptr<LogicalOperator> &root) {
 		// Look for a FILTER with a spatial predicate followed by a LOGICAL_GET table scan
@@ -139,12 +152,20 @@ public:
 				return false;
 			}
 			auto &filter_expr = filter.expressions[0];
-			// Look for a table scan
-			if (filter.children.front()->type != LogicalOperatorType::LOGICAL_GET) {
+			// Look for a table scan (may be behind PROJECTION nodes in DuckDB v1.4.4+)
+			auto *get_ptr_p = FindGetThroughProjections(filter.children.front());
+			if (!get_ptr_p) {
 				return false;
 			}
-			auto &get_ptr = filter.children.front();
-			return TryOptimizeGet(binder, context, get_ptr, root, filter, optional_idx(), filter_expr);
+			auto &get_ptr = *get_ptr_p;
+			// When there are PROJECTION nodes between FILTER and GET,
+			// pass nullptr for filter to avoid projection_map manipulation
+			// that would use incorrect bindings.
+			bool has_intermediate_projections =
+			    (filter.children.front()->type != LogicalOperatorType::LOGICAL_GET);
+			return TryOptimizeGet(binder, context, get_ptr, root,
+			                     has_intermediate_projections ? optional_ptr<LogicalFilter>() : filter,
+			                     optional_idx(), filter_expr);
 		}
 		if (op.type == LogicalOperatorType::LOGICAL_GET) {
 			// this is a LogicalGet - check if there is an ExpressionFilter
@@ -216,6 +237,30 @@ public:
 				return false;
 			}
 
+			// In DuckDB v1.4.4+, PROJECTION nodes may be inserted between FILTER and GET,
+			// causing filter_expr column bindings to differ from GET column bindings.
+			// Fix: temporarily align index_expr's binding with the matching column ref in
+			// filter_expr for the matcher, then restore the original binding afterwards.
+			ColumnBinding original_binding;
+			bool binding_patched = false;
+			if (index_expr->type == ExpressionType::BOUND_COLUMN_REF &&
+			    filter_expr->type == ExpressionType::BOUND_FUNCTION) {
+				auto &idx_ref = index_expr->Cast<BoundColumnRefExpression>();
+				original_binding = idx_ref.binding;
+				auto &func_expr = filter_expr->Cast<BoundFunctionExpression>();
+				for (auto &child : func_expr.children) {
+					if (child->type == ExpressionType::BOUND_COLUMN_REF) {
+						auto &filter_ref = child->Cast<BoundColumnRefExpression>();
+						// Match by column alias (name) rather than binding numbers
+						if (filter_ref.GetName() == idx_ref.GetName()) {
+							idx_ref.binding = filter_ref.binding;
+							binding_patched = true;
+							break;
+						}
+					}
+				}
+			}
+
 			FunctionExpressionMatcher matcher;
 			matcher.function = make_uniq<ManyFunctionMatcher>(spatial_predicates);
 			matcher.expr_type = make_uniq<SpecificExpressionTypeMatcher>(ExpressionType::BOUND_FUNCTION);
@@ -226,7 +271,17 @@ public:
 
 			vector<reference<Expression>> bindings;
 			if (!matcher.Match(*filter_expr, bindings)) {
+				// Restore binding before returning
+				if (binding_patched) {
+					index_expr->Cast<BoundColumnRefExpression>().binding = original_binding;
+				}
 				return false;
+			}
+
+			// Restore original binding after successful match so subsequent code
+			// (e.g. get.column_ids lookups) uses the correct GET-scope binding.
+			if (binding_patched) {
+				index_expr->Cast<BoundColumnRefExpression>().binding = original_binding;
 			}
 
 			// 		bindings[0] = the expression
