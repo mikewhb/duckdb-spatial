@@ -5,6 +5,8 @@
 #include "duckdb/function/table/arrow/arrow_duck_schema.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/main/config.hpp"
+#include "duckdb/main/extension/extension_loader.hpp"
 #include "geometry/geometry_serialization.hpp"
 #include "spatial/geometry/geometry_type.hpp"
 #include "spatial/geometry/sgl.hpp"
@@ -154,6 +156,17 @@ void GeoArrowRegisterScan(ClientContext &context, TableFunctionInput &data_p, Da
 } // namespace
 
 void GeoArrow::Register(ExtensionLoader &loader) {
+	// Automatically register geoarrow.wkb ArrowTypeExtension so that
+	// Arrow-based storage backends (e.g. Lance) can round-trip GEOMETRY columns
+	// with proper extension metadata without requiring a manual call to
+	// register_geoarrow_extensions().
+	auto &instance = loader.GetDatabaseInstance();
+	DBConfig &config = DBConfig::GetConfig(instance);
+	if (!config.HasArrowExtension(GeoTypes::GEOMETRY())) {
+		RegisterArrowExtensions(config);
+	}
+
+	// Keep the table function for backward compatibility and explicit re-registration.
 	TableFunction register_func("register_geoarrow_extensions", {}, GeoArrowRegisterScan, GeoArrowRegisterBind);
 	loader.RegisterFunction(register_func);
 }
